@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+test_*.py
+test_screenshot.png
+test_page_source.html
+
+# Data files - keep numbered JSON files but ignore parquet (internal use only)
+data/*.parquet
+data/fmit_data.json  # Ignore old single file (will be migrated)
+# data/fmit_data_*.json  # Keep numbered JSON files in repo
+# data/page_checkpoint.json  # Keep checkpoint in repo
+
+# Logs
+*.log
+

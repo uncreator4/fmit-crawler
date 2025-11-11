@@ -1,0 +1,126 @@
+name: FMIT Crawler (cron)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write  # Needed to trigger workflow
+
+concurrency:
+  group: fmit-crawler
+  cancel-in-progress: false
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Google Chrome
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run crawler
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: |
+          python crawler.py
+
+      - name: Commit and push if changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            git add -A
+            git commit -m "data: final update $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            # Retry push up to 3 times to handle non-fast-forward due to concurrent runs
+            for i in 1 2 3; do
+              if git push; then
+                echo "Push succeeded"; break
+              else
+                echo "Push failed, attempt $i. Fetching and merging..."
+                git fetch origin
+                CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+                # Try merge - if it fails due to conflicts, resolve JSON conflicts automatically
+                if git merge origin/$CURRENT_BRANCH -m "Merge remote changes" --no-edit; then
+                  echo "Merge successful, retrying push..."
+                else
+                  echo "Merge conflict detected. Resolving JSON conflicts..."
+                  # Find conflicted JSON files and merge them
+                  CONFLICTED_FILES=$(git diff --name-only --diff-filter=U | grep '\.json$' || true)
+                  if [ -n "$CONFLICTED_FILES" ]; then
+                    for file in $CONFLICTED_FILES; do
+                      echo "Merging conflicted JSON file: $file"
+                      # Use git checkout to get all versions
+                      git checkout --ours "$file" && mv "$file" "${file}.ours" || true
+                      git checkout --theirs "$file" && mv "$file" "${file}.theirs" || true
+                      git checkout --base "$file" && mv "$file" "${file}.base" || true
+                      # Merge using Python script
+                      python3 merge_json.py "${file}.ours" "${file}.theirs" "${file}.base" "$file" || {
+                        echo "Failed to merge $file, using ours version"
+                        mv "${file}.ours" "$file" || true
+                      }
+                      rm -f "${file}.ours" "${file}.theirs" "${file}.base" || true
+                      git add "$file"
+                    done
+                    # Continue merge
+                    git commit --no-edit || git merge --abort
+                    echo "✅ Resolved JSON conflicts, retrying push..."
+                  else
+                    echo "⚠️  Non-JSON conflicts detected. Aborting merge and skipping commit..."
+                    git merge --abort || true
+                    git reset --hard HEAD~1 || true
+                    echo "⚠️  Skipped commit due to non-JSON merge conflict."
+                    exit 0
+                  fi
+                fi
+              fi
+              if [ "$i" = "3" ]; then
+                echo "Push failed after 3 retries. Aborting merge..."
+                git merge --abort || true
+                git reset --hard HEAD~1 || true
+                echo "⚠️  Skipped commit after max retries."
+                exit 0
+              fi
+            done
+          else
+            echo "No changes to commit."
+          fi
+      
+      - name: Auto-trigger next run if more pages remain
+        if: success()
+        run: |
+          if [ -f "data/page_checkpoint.json" ]; then
+            LAST_PAGE=$(python -c "import json; f=open('data/page_checkpoint.json'); d=json.load(f); print(d.get('last_page', 0)); f.close()")
+            MAX_PAGES=7185
+            if [ "$LAST_PAGE" -lt "$MAX_PAGES" ]; then
+              echo "✅ More pages remaining ($LAST_PAGE/$MAX_PAGES). Auto-triggering next workflow run..."
+              curl -X POST \
+                -H "Accept: application/vnd.github.v3+json" \
+                -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                https://api.github.com/repos/${{ github.repository }}/actions/workflows/crawl.yml/dispatches \
+                -d '{"ref":"main"}'
+              echo "✅ Next workflow triggered!"
+            else
+              echo "🎉 All pages processed! Crawling complete."
+            fi
+          else
+            echo "No checkpoint found. First run or error occurred."
+          fi
+
